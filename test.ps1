@@ -199,4 +199,28 @@ $log = @(Sim $s $d.AddHours(23) $d.AddHours(25) $typeAll { param($a, $t) 2 })
 Check 'bedtime reminders run before wake' ($log | Where-Object { $_.Type -eq 'bedtime' -and $_.At -eq '23:00' })
 Check 'bedtime stops at wake time' (-not ($log | Where-Object { $_.Type -eq 'bedtime' -and $_.At -ge '00:30' -and $_.At -lt '12:00' }))
 
+# ---- Notes: free-text reminders, dated or daily ----
+Set-Config @{ water = @{ enabled = $false }; notes = @(@{ text = 'No sugar today.'; title = 'Tooth'; date = '2026-10-30'; everyMinutes = 90 }) }
+$s = New-State
+$log = @(Sim $s $d.AddHours(10) $d.AddHours(13).AddMinutes(30) $typeAll $done)
+$notes = @($log | Where-Object { $_.Type -eq 'note' })
+Check 'note fires at once, then every 90 min' ($notes.Count -eq 3 -and $notes[0].At -eq '10:00' -and $notes[1].At -eq '11:30' -and $notes[2].At -eq '13:00' -and $notes[0].Title -eq 'Tooth')
+$s = New-State
+$log = @(Sim $s $d.AddHours(10) $d.AddHours(10).AddMinutes(25) $typeAll { param($a, $t) 0 })
+Check 'ignored note asks again after 10 min' (@($log | Where-Object { $_.Type -eq 'note' }).Count -eq 3)
+$s = New-State
+$log = @(Sim $s $sat.AddHours(10) $sat.AddHours(13) $typeAll $done)
+Check 'dated note silent on other days' ($log.Count -eq 0)
+$s = New-State
+$log = @(Sim $s $d.AddHours(10) $d.AddHours(12) { param($t) $false } $done)
+Check 'note silent while idle' ($log.Count -eq 0)
+Set-Config @{ water = @{ enabled = $false }; notes = @(@{ text = 'Daily note' }) }
+$s = New-State; $s.Remove('Notes')
+$log = @(Sim $s $sat.AddHours(10) $sat.AddHours(11).AddMinutes(30) $typeAll $done)
+Check 'undated note runs every day, hourly by default, old state repaired' (@($log | Where-Object { $_.Type -eq 'note' }).Count -eq 2)
+$threw = $false; try { Set-Config @{ notes = @(@{ text = 'x'; date = '12/11/2026' }) } } catch { $threw = $true }
+Check 'bad note date rejected' $threw
+$threw = $false; try { Set-Config @{ notes = @(@{ title = 'no text' }) } } catch { $threw = $true }
+Check 'note without text rejected' $threw
+
 if ($fail) { Write-Host "$fail FAILED"; exit 1 } else { Write-Host 'ALL PASS' }

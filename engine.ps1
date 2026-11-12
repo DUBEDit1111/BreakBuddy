@@ -12,6 +12,7 @@ function Get-DefaultConfig {
         meals    = @()
         sleep    = @{ enabled = $false; bedtime = '23:00'; wake = '07:00'; windDownMinutes = 30; repeatMinutes = 15 }
         restDays = @()
+        notes    = @()   # free-text reminders: { text, title?, date? "yyyy-MM-dd" (omit = every day), everyMinutes? (60) }
     }
 }
 
@@ -51,7 +52,7 @@ function Set-Config($User) {
         foreach ($k in @($User.Keys)) {
             if ($c[$k] -is [hashtable] -and $User[$k] -is [hashtable]) {
                 foreach ($kk in @($User[$k].Keys)) { $c[$k][$kk] = $User[$k][$kk] }
-            } elseif ($k -in 'meals', 'restDays') { $c[$k] = @($User[$k] | Where-Object { $null -ne $_ }) }
+            } elseif ($k -in 'meals', 'restDays', 'notes') { $c[$k] = @($User[$k] | Where-Object { $null -ne $_ }) }
         }
     }
     $days = 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'
@@ -60,6 +61,17 @@ function Set-Config($User) {
         $s = ConvertTo-Minutes $m.from; $e = ConvertTo-Minutes $m.to
         if ($e -le $s) { throw "Meal '$($m.name)': 'to' must be later than 'from' on the same day" }
         @{ Key = ($m.name -replace '\W', '').ToLower(); Name = $m.name; S = $s; E = $e; To = $m.to }
+    })
+    $i = 0
+    $c.noteList = @(foreach ($n in $c.notes) {
+        $i++
+        if (-not "$($n.text)".Trim()) { throw "Note ${i}: 'text' is missing" }
+        if ("$($n.text)$($n.title)" -match '"') { throw "Note ${i}: use single quotes, not double quotes, in text and title" }
+        if ($n.date -and "$($n.date)" -notmatch '^\d{4}-\d{2}-\d{2}$') { throw "Note ${i}: date '$($n.date)' is not yyyy-MM-dd" }
+        $every = if ($n.everyMinutes) { [int]$n.everyMinutes } else { 60 }
+        if ($every -lt 1) { throw "Note ${i}: everyMinutes must be 1 or more" }
+        $title = if ($n.title) { "$($n.title)" } else { 'Reminder' }
+        @{ Key = "n$i"; Text = "$($n.text)"; Title = $title; Date = $n.date; Every = $every }
     })
     $c.bedMin = ConvertTo-Minutes $c.sleep.bedtime
     $c.wakeMin = ConvertTo-Minutes $c.sleep.wake
@@ -77,7 +89,7 @@ function New-State {
     @{
         Prompts = @(); LastPing = [datetime]'2000-01-01'; ResetAt = [datetime]'2000-01-01'
         BreakUntil = $null; BreakCount = 0; BreakSnoozes = 0; BreakNext = $null
-        LastWater = $null; LastStretch = $null; Meals = @{}; Nights = @{}; Rest = @{}
+        LastWater = $null; LastStretch = $null; Meals = @{}; Nights = @{}; Rest = @{}; Notes = @{}
     }
 }
 
@@ -94,7 +106,7 @@ function Add-Activity($State, [datetime]$At) {
 
 # Older state.xml files may lack keys; add them so the engine never indexes a missing key.
 function Repair-State($State) {
-    foreach ($k in 'Nights', 'Rest', 'Meals') { if (-not $State.ContainsKey($k)) { $State[$k] = @{} } }
+    foreach ($k in 'Nights', 'Rest', 'Meals', 'Notes') { if (-not $State.ContainsKey($k)) { $State[$k] = @{} } }
     $State
 }
 
@@ -223,6 +235,13 @@ function Get-Action($State, $Now) {
                       Msg = "$($m.Name) window is open until $($m.To). Eat something real."
                       Buttons = @('Ate', $second); Timeout = 300 }
         }
+        # Free-text notes: shown while the computer is in use, repeated every note.Every minutes on their day.
+        foreach ($n in $c.noteList) {
+            if ($n.Date -and $n.Date -ne $dayKey) { continue }
+            $k = $dayKey + '-' + $n.Key
+            if ($State.Notes[$k] -and $Now -lt $State.Notes[$k]) { continue }
+            return @{ Type = 'note'; Key = $k; Every = $n.Every; Title = $n.Title; Msg = $n.Text; Buttons = @('Got it'); Timeout = 180 }
+        }
     }
 
     if ($s.Active) {
@@ -276,6 +295,11 @@ function Apply-Result($State, $Action, $Code, $Now) {
                 if ($ms.Snooze -lt $t.MaxSnooze) { $ms.Snooze++; $ms.Next = $Now.AddMinutes($t.SnoozeMin) }
                 else { $ms.Done = $true; $ms.Skipped = $true }
             } else { $ms.Next = $Now.AddMinutes($t.MealRepeatMin) }
+        }
+        'note' {
+            # acknowledged: next after its interval; ignored: ask again in SnoozeMin minutes
+            $mins = if ($Code -eq 1) { $Action.Every } else { $t.SnoozeMin }
+            $State.Notes[$Action.Key] = $Now.AddMinutes($mins)
         }
         'care' {
             foreach ($d in $Action.Due) {

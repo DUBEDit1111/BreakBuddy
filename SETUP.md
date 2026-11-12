@@ -72,6 +72,9 @@ Rules:
 - `restDays` uses full English day names: Monday, Tuesday, Wednesday, Thursday, Friday, Saturday, Sunday.
 - `meals` and `restDays` are lists; use `[]` for none.
 - A meal's `to` must be later than its `from`.
+- `notes` is an optional list of free-text reminders, for example
+  `{ "title": "Tooth care", "text": "Take your meds when a dose is due.", "date": "2026-11-12", "everyMinutes": 90 }`.
+  Leave out `date` for every day and `everyMinutes` for hourly. No double quotes inside `text` or `title`.
 
 Then run these from the BreakBuddy folder in PowerShell. `-ExecutionPolicy Bypass` is needed because
 Windows blocks downloaded scripts by default; it applies only to that one command.

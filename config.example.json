@@ -4,5 +4,6 @@
   "breaks":   { "enabled": false, "afterMinutes": 60, "snoozeMinutes": 10, "maxSnoozes": 3 },
   "meals":    [],
   "sleep":    { "enabled": false, "bedtime": "23:00", "wake": "07:00", "windDownMinutes": 30, "repeatMinutes": 15 },
-  "restDays": []
+  "restDays": [],
+  "notes":    []
 }
