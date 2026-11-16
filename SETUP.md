@@ -44,6 +44,14 @@ them to 24-hour `HH:mm` yourself. Read each converted time back so they can corr
    - Break reminders after a long stretch of computer use (default after 60 minutes; offers 15 or 25 minute breaks).
    - Stretch reminders (default every 30 minutes).
    - Rest days: days of the week when it gently suggests not working.
+   - Walks: reminders to get outside for 15 to 20 minutes. Suggest a mid-morning window (10:00 to 11:00)
+     and an afternoon window (15:00 to 17:00); `walks` uses the same `name`/`from`/`to` shape as `meals`.
+   - Morning sunlight: one reminder in the first hour after their wake time to step outside for 5 to 10
+     minutes (`morningSun`; it uses `sleep.wake`, so ask their wake time even if bedtime reminders are off).
+   - Session timer: a work block followed by a rest. Offer 60 minutes then 15, 90 minutes then 30, or
+     their own numbers. Ask whether a session should start as soon as they use the computer
+     (`"startOn": "activity"`) or when they send their AI a prompt (`"startOn": "prompt"`, which needs
+     the hook in step 6). It replaces the plain break reminder while it is on.
 
 Then summarise the whole schedule back in a short list and ask "Does this look right?" Change anything
 they correct before writing.
@@ -58,11 +66,16 @@ leave out keep their defaults, but write all of them so the person can see and e
   "water":    { "enabled": true,  "everyMinutes": 60 },
   "stretch":  { "enabled": false, "everyMinutes": 30 },
   "breaks":   { "enabled": false, "afterMinutes": 60, "snoozeMinutes": 10, "maxSnoozes": 3 },
+  "session":  { "enabled": false, "workMinutes": 60, "restMinutes": 15, "startOn": "activity", "snoozeMinutes": 10, "maxSnoozes": 3 },
   "meals":    [
     { "name": "Breakfast", "from": "08:00", "to": "10:00" },
     { "name": "Lunch",     "from": "12:30", "to": "14:30" }
   ],
+  "walks":    [
+    { "name": "Mid-morning walk", "from": "10:00", "to": "11:00" }
+  ],
   "sleep":    { "enabled": true, "bedtime": "23:30", "wake": "07:30", "windDownMinutes": 30, "repeatMinutes": 15 },
+  "morningSun": { "enabled": false, "withinMinutes": 60 },
   "restDays": ["Sunday"]
 }
 ```
@@ -72,6 +85,9 @@ Rules:
 - `restDays` uses full English day names: Monday, Tuesday, Wednesday, Thursday, Friday, Saturday, Sunday.
 - `meals` and `restDays` are lists; use `[]` for none.
 - A meal's `to` must be later than its `from`.
+- A meal may carry an optional `text`, shown under its reminder (a breathing practice, a note), for example
+  `{ "name": "Lunch", "from": "12:30", "to": "14:30", "text": "Three slow breaths first.\nFeet flat on the ground." }`.
+  `\n` starts a new line. No double quotes inside `text`.
 - `notes` is an optional list of free-text reminders, for example
   `{ "title": "Tooth care", "text": "Take your meds when a dose is due.", "date": "2026-11-12", "everyMinutes": 90 }`.
   Leave out `date` for every day and `everyMinutes` for hourly. No double quotes inside `text` or `title`.
@@ -115,10 +131,12 @@ under `hooks.UserPromptSubmit` (replace the path with the real folder, using for
 ```
 
 Only do this if the person asks for it or agrees when you offer. Most people do not need it.
+It is required for the session timer's `"startOn": "prompt"`: each prompt then starts a session when none is running.
 
 ## 7. Tell them how to live with it
 
-- Change settings any time by editing `config.json` (or asking their AI to). No restart needed.
+- Change settings any time in the settings window ("BreakBuddy Settings" in the Start menu), by editing
+  `config.json`, or by asking their AI to. No restart needed.
 - Every reminder has buttons; ignoring one just means it asks again a bit later.
 - To turn BreakBuddy off for good:
 

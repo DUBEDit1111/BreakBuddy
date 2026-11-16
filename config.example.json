@@ -2,8 +2,11 @@
   "water":    { "enabled": true,  "everyMinutes": 60 },
   "stretch":  { "enabled": false, "everyMinutes": 30 },
   "breaks":   { "enabled": false, "afterMinutes": 60, "snoozeMinutes": 10, "maxSnoozes": 3 },
+  "session":  { "enabled": false, "workMinutes": 60, "restMinutes": 15, "startOn": "activity", "snoozeMinutes": 10, "maxSnoozes": 3 },
   "meals":    [],
+  "walks":    [],
   "sleep":    { "enabled": false, "bedtime": "23:00", "wake": "07:00", "windDownMinutes": 30, "repeatMinutes": 15 },
+  "morningSun": { "enabled": false, "withinMinutes": 60 },
   "restDays": [],
   "notes":    []
 }

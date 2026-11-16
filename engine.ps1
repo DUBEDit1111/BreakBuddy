@@ -9,10 +9,15 @@ function Get-DefaultConfig {
         water    = @{ enabled = $true;  everyMinutes = 60 }
         stretch  = @{ enabled = $false; everyMinutes = 30 }
         breaks   = @{ enabled = $false; afterMinutes = 60; snoozeMinutes = 10; maxSnoozes = 3 }
-        meals    = @()
-        sleep    = @{ enabled = $false; bedtime = '23:00'; wake = '07:00'; windDownMinutes = 30; repeatMinutes = 15 }
+        meals    = @()   # { name, from "HH:mm", to "HH:mm", text? } - text is shown under the meal reminder (a practice, a note)
+        walks    = @()   # get-outside reminders, same shape as meals: { name, from "HH:mm", to "HH:mm" }
+        morningSun = @{ enabled = $false; withinMinutes = 60 }   # outdoor light reminder in the first minutes after sleep.wake
+        sleep   = @{ enabled = $false; bedtime = '23:00'; wake = '07:00'; windDownMinutes = 30; repeatMinutes = 15 }
         restDays = @()
         notes    = @()   # free-text reminders: { text, title?, date? "yyyy-MM-dd" (omit = every day), everyMinutes? (60) }
+        # Session timer: a work block of workMinutes, then a rest of restMinutes. Presets 60/15 and 90/30; any numbers work.
+        # startOn: 'activity' = first keyboard/mouse use, 'prompt' = first AI prompt ping (ping.txt). Replaces 'breaks' while on.
+        session  = @{ enabled = $false; workMinutes = 60; restMinutes = 15; startOn = 'activity'; snoozeMinutes = 10; maxSnoozes = 3 }
     }
 }
 
@@ -52,7 +57,7 @@ function Set-Config($User) {
         foreach ($k in @($User.Keys)) {
             if ($c[$k] -is [hashtable] -and $User[$k] -is [hashtable]) {
                 foreach ($kk in @($User[$k].Keys)) { $c[$k][$kk] = $User[$k][$kk] }
-            } elseif ($k -in 'meals', 'restDays', 'notes') { $c[$k] = @($User[$k] | Where-Object { $null -ne $_ }) }
+            } elseif ($k -in 'meals', 'walks', 'restDays', 'notes') { $c[$k] = @($User[$k] | Where-Object { $null -ne $_ }) }
         }
     }
     $days = 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'
@@ -60,7 +65,13 @@ function Set-Config($User) {
     $c.mealList = @(foreach ($m in $c.meals) {
         $s = ConvertTo-Minutes $m.from; $e = ConvertTo-Minutes $m.to
         if ($e -le $s) { throw "Meal '$($m.name)': 'to' must be later than 'from' on the same day" }
-        @{ Key = ($m.name -replace '\W', '').ToLower(); Name = $m.name; S = $s; E = $e; To = $m.to }
+        if ("$($m.text)" -match '"') { throw "Meal '$($m.name)': use single quotes, not double quotes, in text" }
+        @{ Key = ($m.name -replace '\W', '').ToLower(); Name = $m.name; S = $s; E = $e; To = $m.to; Text = "$($m.text)".Trim() }
+    })
+    $c.walkList = @(foreach ($m in $c.walks) {
+        $s = ConvertTo-Minutes $m.from; $e = ConvertTo-Minutes $m.to
+        if ($e -le $s) { throw "Walk '$($m.name)': 'to' must be later than 'from' on the same day" }
+        @{ Key = 'walk' + ($m.name -replace '\W', '').ToLower(); Name = $m.name; S = $s; E = $e; To = $m.to; Walk = $true }
     })
     $i = 0
     $c.noteList = @(foreach ($n in $c.notes) {
@@ -73,13 +84,22 @@ function Set-Config($User) {
         $title = if ($n.title) { "$($n.title)" } else { 'Reminder' }
         @{ Key = "n$i"; Text = "$($n.text)"; Title = $title; Date = $n.date; Every = $every }
     })
+    $se = $c.session
+    foreach ($k in 'workMinutes', 'restMinutes', 'snoozeMinutes') {
+        $se[$k] = [int]$se[$k]
+        if ($se[$k] -lt 1) { throw "session.$k must be 1 or more" }
+    }
+    $se.maxSnoozes = [int]$se.maxSnoozes
+    if ('prompt', 'activity' -notcontains $se.startOn) { throw "session.startOn '$($se.startOn)' must be 'prompt' or 'activity'" }
+    $c.morningSun.withinMinutes = [int]$c.morningSun.withinMinutes
+    if ($c.morningSun.withinMinutes -lt 1) { throw 'morningSun.withinMinutes must be 1 or more' }
     $c.bedMin = ConvertTo-Minutes $c.sleep.bedtime
     $c.wakeMin = ConvertTo-Minutes $c.sleep.wake
     $script:Cfg = $c
 }
 
 function Import-Config([string]$Path) {
-    $u = if (Test-Path $Path) { ConvertTo-Hash (Get-Content $Path -Raw | ConvertFrom-Json) } else { $null }
+    $u = if (Test-Path $Path) { ConvertTo-Hash (Get-Content $Path -Raw -Encoding UTF8 | ConvertFrom-Json) } else { $null }
     Set-Config $u
 }
 
@@ -90,7 +110,44 @@ function New-State {
         Prompts = @(); LastPing = [datetime]'2000-01-01'; ResetAt = [datetime]'2000-01-01'
         BreakUntil = $null; BreakCount = 0; BreakSnoozes = 0; BreakNext = $null
         LastWater = $null; LastStretch = $null; Meals = @{}; Nights = @{}; Rest = @{}; Notes = @{}
+        SessionStart = $null; SessionNext = $null; SessionSnoozes = 0
     }
+}
+
+# Starts a work session at $At if the session timer is on, none is running, and no rest is in progress.
+# Returns $true when a session started. The caller decides what counts as a trigger (AI prompt ping or activity).
+function Start-Session($State, [datetime]$At) {
+    $null = Repair-State $State
+    if (-not $script:Cfg.session.enabled) { return $false }
+    if ($State.SessionStart) { return $false }
+    if ($State.BreakUntil -and $At -lt $State.BreakUntil) { return $false }
+    $State.SessionStart = $At; $State.SessionNext = $null; $State.SessionSnoozes = 0
+    $true
+}
+
+# True when the running session already contains a pause as long as the rest (stepped away, PC slept): the rest is taken.
+function Test-SessionRested($State, $Now) {
+    $rest = $script:Cfg.session.restMinutes
+    $prev = $State.SessionStart
+    foreach ($p in @($State.Prompts | Where-Object { $_ -gt $State.SessionStart -and $_ -le $Now } | Sort-Object) + $Now) {
+        if (($p - $prev).TotalMinutes -ge $rest) { return $true }
+        $prev = $p
+    }
+    $false
+}
+
+# One line for the settings window: where the session timer stands right now.
+function Get-SessionStatus($State, $Now) {
+    $se = $script:Cfg.session
+    $null = Repair-State $State
+    if (-not $se.enabled) { return 'Session timer is off.' }
+    if ($State.BreakUntil -and $Now -lt $State.BreakUntil) { return "Resting: $([int][math]::Ceiling(($State.BreakUntil - $Now).TotalMinutes)) min left." }
+    if ($State.SessionStart) {
+        $left = $se.workMinutes - ($Now - $State.SessionStart).TotalMinutes
+        if ($left -gt 0) { return "Working: $([int][math]::Ceiling($left)) min left of $($se.workMinutes). Started $($State.SessionStart.ToString('HH:mm'))." }
+        return "Session complete: $($se.restMinutes) min rest is due."
+    }
+    if ($se.startOn -eq 'prompt') { 'No session running. The next AI prompt starts one.' } else { 'No session running. The next computer use starts one.' }
 }
 
 # Records one activity mark (keyboard/mouse, or an AI prompt ping), at most one per minute.
@@ -107,6 +164,8 @@ function Add-Activity($State, [datetime]$At) {
 # Older state.xml files may lack keys; add them so the engine never indexes a missing key.
 function Repair-State($State) {
     foreach ($k in 'Nights', 'Rest', 'Meals', 'Notes') { if (-not $State.ContainsKey($k)) { $State[$k] = @{} } }
+    foreach ($k in 'SessionStart', 'SessionNext') { if (-not $State.ContainsKey($k)) { $State[$k] = $null } }
+    if (-not $State.ContainsKey('SessionSnoozes')) { $State.SessionSnoozes = 0 }
     $State
 }
 
@@ -154,8 +213,8 @@ function Get-NightAction($State, $Now) {
     if ($Now -lt $n.Bed) {
         if ($ns.Wind) { return $null }
         return @{ Type = 'winddown'; Key = $n.Key; Title = 'Wind down'
-                  Msg = "Bed in $($c.sleep.windDownMinutes) minutes. Good moment to save, wrap up, and let the day land."
-                  Buttons = @('Winding down'); Timeout = 300 }
+                  Msg = "Bed in $($c.sleep.windDownMinutes) minutes. Save and wrap up. Dim the lights, put screens away, cool the room to 65-68 F (18-20 C). A warm shower helps you drift off."
+                  Buttons = @('Winding down', 'Sleep tips'); TipsButton = 2; Timeout = 300 }
     }
     if ($ns.Next -and $Now -lt $ns.Next) { return $null }
     return @{ Type = 'bedtime'; Key = $n.Key; Title = 'Bedtime'
@@ -202,6 +261,21 @@ function Get-Action($State, $Now) {
         return $null
     }
 
+    # Session timer: work block started by Start-Session, rest popup when it is over.
+    $se = $c.session
+    if (-not $se.enabled) { $State.SessionStart = $null }
+    elseif ($State.SessionStart) {
+        if (Test-SessionRested $State $Now) {
+            $State.SessionStart = $null; $State.SessionNext = $null; $State.SessionSnoozes = 0
+        } elseif ($Now -ge $State.SessionStart.AddMinutes($se.workMinutes) -and (-not $State.SessionNext -or $Now -ge $State.SessionNext) -and (Test-InUse $State $Now)) {
+            $btn = @("Resting $($se.restMinutes)")
+            if ($State.SessionSnoozes -lt $se.maxSnoozes) { $btn += "Snooze $($se.snoozeMinutes)" }
+            return @{ Type = 'session'; Rest = $se.restMinutes; Title = 'Session complete'
+                      Msg = "$($se.workMinutes) minute session done. Rest for $($se.restMinutes) minutes: stand up, drink water, look away from the screen."
+                      Buttons = $btn; Timeout = $t.BreakPopupSec }
+        }
+    }
+
     $s = Get-Session $State $Now
     if (-not $s.Active) {
         # Idle: break cycle forgets itself, water/stretch clocks start fresh when work resumes.
@@ -213,7 +287,7 @@ function Get-Action($State, $Now) {
     }
 
     $b = $c.breaks
-    if ($b.enabled -and $s.Active -and $s.WorkMin -ge $b.afterMinutes -and (-not $State.BreakNext -or $Now -ge $State.BreakNext)) {
+    if ($b.enabled -and -not $se.enabled -and $s.Active -and $s.WorkMin -ge $b.afterMinutes -and (-not $State.BreakNext -or $Now -ge $State.BreakNext)) {
         $btn = @('Taking 15', 'Taking 25')
         if ($State.BreakSnoozes -lt $b.maxSnoozes) { $btn += "Snooze $($b.snoozeMinutes)" }
         return @{ Type = 'break'; Title = 'Break time'
@@ -223,17 +297,42 @@ function Get-Action($State, $Now) {
 
     if (Test-InUse $State $Now) {
         $nowMin = $Now.Hour * 60 + $Now.Minute
-        foreach ($m in $c.mealList) {
+        # Morning sunlight: once per wake-up, while inside the first withinMinutes after the wake time.
+        if ($c.morningSun.enabled) {
+            $delta = ($nowMin - $c.wakeMin + 1440) % 1440
+            if ($delta -lt $c.morningSun.withinMinutes) {
+                $k = 'sun-' + $Now.AddMinutes(-$delta).ToString('yyyy-MM-dd')
+                if (-not $State.Meals.ContainsKey($k)) { $State.Meals[$k] = @{ Done = $false; Next = $null; Snooze = 0 } }
+                $ms = $State.Meals[$k]
+                if (-not $ms.Done -and (-not $ms.Next -or $Now -ge $ms.Next)) {
+                    $second = if ($ms.Snooze -lt $t.MaxSnooze) { "Snooze $($t.SnoozeMin)" } else { 'Skipping today' }
+                    return @{ Type = 'sun'; Key = $k; Title = 'Morning sunlight'
+                              Msg = 'Step outside for 5 to 10 minutes of morning light (15 to 30 if it is cloudy). It sets your body clock, mood, focus and sleep.'
+                              Buttons = @('Got my light', $second); Timeout = 300 }
+                }
+            }
+        }
+        foreach ($m in @($c.mealList) + @($c.walkList)) {
             $k = $dayKey + '-' + $m.Key
             if (-not $State.Meals.ContainsKey($k)) { $State.Meals[$k] = @{ Done = $false; Next = $null; Snooze = 0 } }
             $ms = $State.Meals[$k]
             if ($ms.Done) { continue }
             if ($nowMin -lt $m.S -or $nowMin -ge $m.E) { continue }
             if ($ms.Next -and $Now -lt $ms.Next) { continue }
+            if ($m.Walk) {
+                $second = if ($ms.Snooze -lt $t.MaxSnooze) { "Snooze $($t.SnoozeMin)" } else { 'Skipping this walk' }
+                return @{ Type = 'walk'; Key = $k; Title = $m.Name
+                          Msg = "Time to get outside for 15 to 20 minutes. Daylight and a walk reset your focus. Window open until $($m.To)."
+                          Buttons = @('Walked', $second); Timeout = 300 }
+            }
             $second = if ($ms.Snooze -lt $t.MaxSnooze) { "Snooze $($t.SnoozeMin)" } else { 'Skipping this meal' }
+            # A meal with its own text (a practice to do with the meal) shows it under the reminder and stays up longer.
+            $msg = "$($m.Name) window is open until $($m.To). Eat something real."
+            $wait = 300
+            if ($m.Text) { $msg += "`n`n" + $m.Text; $wait = 600 }
             return @{ Type = 'meal'; Key = $k; Title = "$($m.Name) time"
-                      Msg = "$($m.Name) window is open until $($m.To). Eat something real."
-                      Buttons = @('Ate', $second); Timeout = 300 }
+                      Msg = $msg
+                      Buttons = @('Ate', $second); Timeout = $wait }
         }
         # Free-text notes: shown while the computer is in use, repeated every note.Every minutes on their day.
         foreach ($n in $c.noteList) {
@@ -288,7 +387,21 @@ function Apply-Result($State, $Action, $Code, $Now) {
                 }
             }
         }
-        'meal' {
+        'session' {
+            if ($Code -eq 1) {
+                $State.BreakUntil = $Now.AddMinutes($Action.Rest)
+                $State.ResetAt = $State.BreakUntil
+                $State.SessionStart = $null; $State.SessionNext = $null; $State.SessionSnoozes = 0
+                $State.LastWater = $State.BreakUntil; $State.LastStretch = $State.BreakUntil
+            } elseif ($Code -eq 2) {
+                $State.SessionSnoozes++
+                $State.SessionNext = $Now.AddMinutes($c.session.snoozeMinutes)
+            } else {
+                # ignored: ask again in SnoozeMin minutes (a pause as long as the rest ends the session by itself)
+                $State.SessionNext = $Now.AddMinutes($t.SnoozeMin)
+            }
+        }
+        { $_ -in 'meal', 'walk', 'sun' } {
             $ms = $State.Meals[$Action.Key]
             if ($Code -eq 1) { $ms.Done = $true }
             elseif ($Code -eq 2) {

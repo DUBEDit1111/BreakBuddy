@@ -11,16 +11,25 @@ if ($Popup) {
     $script:code = 0
     $script:ang = 0.0
 
+    # Long messages (a meal with its own text) make the bubble taller. '\n' in -Msg is a line break.
+    $Msg = $Msg -replace '\\n', "`n"
+    $msgFont = New-Object Drawing.Font('Segoe UI', 11)
+    $wa = [Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+    $need = [Windows.Forms.TextRenderer]::MeasureText($Msg, $msgFont, (New-Object Drawing.Size(285, 0)), [Windows.Forms.TextFormatFlags]'WordBreak, TextBoxControl').Height + 6
+    $grow = [math]::Max(0, [math]::Min($need - 110, $wa.Height - 320))
+    $dy = [int]($grow / 2)
+    $formH = 300 + $grow
+
     # Shape: disc (cube) + rounded bubble with a tail pointing at the cube. Same path shapes drive Region and painting.
-    $discRect = New-Object Drawing.Rectangle(10, 50, 200, 200)
-    $bx = 225; $by = 30; $bw = 325; $bh = 240; $r = 22
+    $discRect = New-Object Drawing.Rectangle(10, (50 + $dy), 200, 200)
+    $bx = 225; $by = 30; $bw = 325; $bh = 240 + $grow; $r = 22
     $bubble = New-Object Drawing.Drawing2D.GraphicsPath
     $bubble.AddArc($bx, $by, 2 * $r, 2 * $r, 180, 90)
     $bubble.AddArc($bx + $bw - 2 * $r, $by, 2 * $r, 2 * $r, 270, 90)
     $bubble.AddArc($bx + $bw - 2 * $r, $by + $bh - 2 * $r, 2 * $r, 2 * $r, 0, 90)
     $bubble.AddArc($bx, $by + $bh - 2 * $r, 2 * $r, 2 * $r, 90, 90)
-    $bubble.AddLine($bx, 175, 203, 150)
-    $bubble.AddLine(203, 150, $bx, 125)
+    $bubble.AddLine($bx, (175 + $dy), 203, (150 + $dy))
+    $bubble.AddLine(203, (150 + $dy), $bx, (125 + $dy))
     $bubble.CloseFigure()
     $disc = New-Object Drawing.Drawing2D.GraphicsPath
     $disc.AddEllipse($discRect)
@@ -46,11 +55,10 @@ if ($Popup) {
     $f = New-Object Windows.Forms.Form
     $f.FormBorderStyle = 'None'; $f.ShowInTaskbar = $false; $f.TopMost = $true
     $f.BackColor = [Drawing.Color]::FromArgb(255, 22, 20, 44)
-    $f.ClientSize = New-Object Drawing.Size(560, 300)
+    $f.ClientSize = New-Object Drawing.Size(560, $formH)
     $f.Region = $region
     $f.StartPosition = 'Manual'
-    $wa = [Windows.Forms.Screen]::PrimaryScreen.WorkingArea
-    $f.Location = New-Object Drawing.Point(($wa.Right - 560 - 10), ($wa.Bottom - 300 - 10))
+    $f.Location = New-Object Drawing.Point(($wa.Right - 560 - 10), ($wa.Bottom - $formH - 10))
     $f.GetType().GetProperty('DoubleBuffered', [Reflection.BindingFlags]'Instance,NonPublic').SetValue($f, $true)
 
     $f.Add_Paint({
@@ -59,7 +67,7 @@ if ($Popup) {
         $g.FillPath($brDark, $bubble); $g.DrawPath($penEdge, $bubble)
         $g.FillEllipse($brDisc, $discRect); $g.DrawEllipse($penEdge, $discRect)
         $st = $g.Save()
-        $g.TranslateTransform(110, 150); $g.RotateTransform([float]$script:ang)
+        $g.TranslateTransform(110, (150 + $dy)); $g.RotateTransform([float]$script:ang)
         for ($i = 0; $i -lt $pts.Count; $i++) { for ($j = $i + 1; $j -lt $pts.Count; $j++) { $g.DrawLine($penLine, $pts[$i], $pts[$j]) } }
         foreach ($p in $pts) { $g.DrawEllipse($penCirc, $p.X - $R, $p.Y - $R, 2 * $R, 2 * $R) }
         $g.Restore($st)
@@ -71,9 +79,10 @@ if ($Popup) {
     $tl.Location = New-Object Drawing.Point(245, 44); $tl.Size = New-Object Drawing.Size(285, 30)
     $f.Controls.Add($tl)
     $ml = New-Object Windows.Forms.Label
-    $ml.Text = $Msg; $ml.Font = New-Object Drawing.Font('Segoe UI', 11)
+    $ml.UseCompatibleTextRendering = $false   # draw with the same engine that measured the text above
+    $ml.Text = $Msg; $ml.Font = $msgFont
     $ml.ForeColor = [Drawing.Color]::FromArgb(255, 235, 232, 250); $ml.BackColor = [Drawing.Color]::Transparent
-    $ml.Location = New-Object Drawing.Point(245, 80); $ml.Size = New-Object Drawing.Size(285, 110)
+    $ml.Location = New-Object Drawing.Point(245, 80); $ml.Size = New-Object Drawing.Size(285, (110 + $grow))
     $f.Controls.Add($ml)
 
     $names = $Buttons -split '\|'
@@ -83,7 +92,7 @@ if ($Popup) {
         $b.Text = $names[$i]; $b.Tag = $i + 1; $b.Font = New-Object Drawing.Font('Segoe UI', 10)
         $b.FlatStyle = 'Flat'; $b.FlatAppearance.BorderColor = [Drawing.Color]::FromArgb(255, 232, 200, 120)
         $b.BackColor = [Drawing.Color]::FromArgb(255, 44, 38, 84); $b.ForeColor = [Drawing.Color]::White
-        $b.Size = New-Object Drawing.Size($w, 40); $b.Location = New-Object Drawing.Point((245 + $i * ($w + 6)), 205)
+        $b.Size = New-Object Drawing.Size($w, 40); $b.Location = New-Object Drawing.Point((245 + $i * ($w + 6)), (205 + $grow))
         $b.Add_Click({ $script:code = [int]$this.Tag; $this.FindForm().Close() })
         $f.Controls.Add($b)
     }
@@ -101,8 +110,8 @@ if ($Popup) {
             $script:snapT = New-Object Windows.Forms.Timer; $script:snapT.Interval = 700
             $snapT.Add_Tick({
                 $script:snapT.Stop()
-                $bmp = New-Object Drawing.Bitmap(560, 300)
-                $f.DrawToBitmap($bmp, (New-Object Drawing.Rectangle(0, 0, 560, 300)))
+                $bmp = New-Object Drawing.Bitmap(560, $formH)
+                $f.DrawToBitmap($bmp, (New-Object Drawing.Rectangle(0, 0, 560, $formH)))
                 $bmp.Save($Snap, [Drawing.Imaging.ImageFormat]::Png); $bmp.Dispose()
                 $f.Close()
             })
@@ -156,18 +165,31 @@ while ($true) {
             if ($mt -gt $State.LastPing) {
                 $State.LastPing = $mt
                 Add-Activity $State $mt
+                # A fresh AI prompt starts a work session (session.startOn = 'prompt'). Stale pings from before a restart do not.
+                if ($Cfg.session.startOn -eq 'prompt' -and ($Now - $mt).TotalMinutes -lt 5 -and (Start-Session $State $mt)) {
+                    Log "session started by AI prompt: $($Cfg.session.workMinutes) min work, $($Cfg.session.restMinutes) min rest"
+                }
             }
         }
         $idle = [BB.Idle]::Seconds()
-        if ($idle -ge 0 -and $idle -lt $ActiveIdleSec) { Add-Activity $State $Now.AddSeconds(-$idle) }
+        if ($idle -ge 0 -and $idle -lt $ActiveIdleSec) {
+            Add-Activity $State $Now.AddSeconds(-$idle)
+            if ($Cfg.session.startOn -eq 'activity' -and (Start-Session $State $Now)) {
+                Log "session started by computer use: $($Cfg.session.workMinutes) min work, $($Cfg.session.restMinutes) min rest"
+            }
+        }
         $a = Get-Action $State $Now
         if ($a) {
             Log "popup $($a.Type): $($a.Title)"
             $argLine = '-NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File "{0}" -Popup -Title "{1}" -Msg "{2}" -Buttons "{3}" -Timeout {4}' -f `
-                (Join-Path $Root 'buddy.ps1'), $a.Title, $a.Msg, ($a.Buttons -join '|'), $a.Timeout
+                (Join-Path $Root 'buddy.ps1'), $a.Title, ($a.Msg -replace '\r?\n', '\n'), ($a.Buttons -join '|'), $a.Timeout
             $p = Start-Process powershell.exe -ArgumentList $argLine -PassThru -Wait -WindowStyle Hidden
             Apply-Result $State $a $p.ExitCode (Get-Date)
             Log "  answer code $($p.ExitCode)"
+            # 'Sleep tips' on the wind-down popup opens the settings window at its Sleep guide tab.
+            if ($a.TipsButton -and $p.ExitCode -eq $a.TipsButton) {
+                Start-Process powershell.exe -WindowStyle Hidden -ArgumentList ('-NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -Tab 5' -f (Join-Path $Root 'settings.ps1'))
+            }
         }
         $State | Export-Clixml $stateFile
     } catch { Log "error: $($_.Exception.Message)" }

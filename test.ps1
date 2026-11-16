@@ -180,6 +180,16 @@ Check 'bad day name rejected' $threw
 '{ "meals": [ { "name": "Dinner", "from": "20:00", "to": "18:00" } ] }' | Set-Content $tmp
 $threw = $false; try { Import-Config $tmp } catch { $threw = $true }
 Check 'meal ending before it starts rejected' $threw
+# a meal's own text: shown under the reminder, popup stays up longer; meals without text are unchanged
+'{ "water": { "enabled": false }, "meals": [ { "name": "Lunch", "from": "12:00", "to": "13:30", "text": "Breathe in 3, hold 3, out 4.\n2. Feet flat." }, { "name": "Dinner", "from": "18:00", "to": "20:00" } ] }' | Set-Content $tmp
+Import-Config $tmp
+$s = New-State; $s.Prompts = @($d.AddHours(12)); $a = Get-Action $s $d.AddHours(12).AddMinutes(1)
+Check 'meal text shown under the reminder' ($a.Type -eq 'meal' -and $a.Msg -match 'Eat something real\.\n\nBreathe in 3' -and $a.Msg -match '\n2\. Feet flat' -and $a.Timeout -eq 600)
+$s = New-State; $s.Prompts = @($d.AddHours(18)); $a = Get-Action $s $d.AddHours(18).AddMinutes(1)
+Check 'meal without text unchanged' ($a.Type -eq 'meal' -and $a.Msg -eq 'Dinner window is open until 20:00. Eat something real.' -and $a.Timeout -eq 300)
+'{ "meals": [ { "name": "Lunch", "from": "12:00", "to": "13:30", "text": "Say \"hello\"" } ] }' | Set-Content $tmp
+$threw = $false; try { Import-Config $tmp } catch { $threw = $true }
+Check 'double quotes in meal text rejected' $threw
 Remove-Item $tmp
 
 # ---- Day-sleeper (night shift): bed 09:00, wake 17:00 ----
@@ -222,5 +232,96 @@ $threw = $false; try { Set-Config @{ notes = @(@{ text = 'x'; date = '12/11/2026
 Check 'bad note date rejected' $threw
 $threw = $false; try { Set-Config @{ notes = @(@{ title = 'no text' }) } } catch { $threw = $true }
 Check 'note without text rejected' $threw
+
+# ---- Walks: get-outside windows, same mechanics as meals ----
+Set-Config @{ water = @{ enabled = $false }; walks = @(@{ name = 'Morning walk'; from = '10:00'; to = '11:00' }, @{ name = 'Afternoon walk'; from = '15:00'; to = '17:00' }) }
+$s = New-State
+$log = @(Sim $s $d.AddHours(9) $d.AddHours(18) $typeAll $done)
+$walks = @($log | Where-Object { $_.Type -eq 'walk' })
+Check 'two walks: 10:00 and 15:00, once each after Walked' ($log.Count -eq 2 -and $walks.Count -eq 2 -and $walks[0].At -eq '10:00' -and $walks[0].Title -eq 'Morning walk' -and $walks[1].At -eq '15:00')
+$s = New-State
+$log = @(Sim $s $d.AddHours(10) $d.AddHours(11).AddMinutes(30) $typeAll { param($a, $t) 2 })
+Check 'walk snoozes 3 times (10:00-10:30), then Skipping ends it' (@($log | Where-Object { $_.Type -eq 'walk' }).Count -eq 4 -and $log[-1].At -eq '10:30')
+$s = New-State
+$log = @(Sim $s $d.AddHours(9) $d.AddHours(18) { param($t) $false } $done)
+Check 'no walk popup while away' ($log.Count -eq 0)
+$threw = $false; try { Set-Config @{ walks = @(@{ name = 'Walk'; from = '17:00'; to = '15:00' }) } } catch { $threw = $true }
+Check 'walk ending before it starts rejected' $threw
+
+# ---- Morning sunlight: once, inside the first hour after the wake time ----
+Set-Config @{ water = @{ enabled = $false }; sleep = @{ enabled = $true; bedtime = '00:00'; wake = '08:00' }; morningSun = @{ enabled = $true; withinMinutes = 60 } }
+$s = New-State
+$log = @(Sim $s $d.AddHours(7) $d.AddHours(12) $typeAll $done)
+Check 'morning sun once, at wake time 08:00' ($log.Count -eq 1 -and $log[0].Type -eq 'sun' -and $log[0].At -eq '08:00')
+$s = New-State
+$log = @(Sim $s $d.AddHours(8).AddMinutes(40) $d.AddHours(12) $typeAll { param($a, $t) 2 })
+Check 'morning sun snooze stays inside the hour' (@($log | Where-Object { $_.Type -eq 'sun' }).Count -eq 2 -and -not ($log | Where-Object { $_.At -ge '09:00' }))
+$s = New-State
+$log = @(Sim $s $d.AddHours(9).AddMinutes(5) $d.AddHours(12) $typeAll $done)
+Check 'no morning sun popup after the first hour' ($log.Count -eq 0)
+Set-Config @{ water = @{ enabled = $false } }
+$s = New-State
+$log = @(Sim $s $d.AddHours(6) $d.AddHours(12) $typeAll $done)
+Check 'morning sun off by default' ($log.Count -eq 0)
+
+# ---- Session timer: work block then rest (60/15, 90/30, custom) ----
+$sessAns = { param($a, $t) 1 }
+Set-Config @{ water = @{ enabled = $false }; session = @{ enabled = $true; workMinutes = 60; restMinutes = 15; startOn = 'prompt' } }
+$s = New-State
+Check 'session starts on trigger' ((Start-Session $s $d.AddHours(10)) -eq $true)
+Check 'second trigger does not restart a running session' ((Start-Session $s $d.AddHours(10).AddMinutes(20)) -eq $false -and $s.SessionStart -eq $d.AddHours(10))
+Check 'status while working' ((Get-SessionStatus $s $d.AddHours(10).AddMinutes(20)) -eq 'Working: 40 min left of 60. Started 10:00.')
+$log = @(Sim $s $d.AddHours(10) $d.AddHours(12) $typeAll $sessAns)
+$sess = @($log | Where-Object { $_.Type -eq 'session' })
+Check '60/15: one session popup at 11:00' ($sess.Count -eq 1 -and $sess[0].At -eq '11:00')
+Check '60/15: rest ends 11:15 with a welcome back' ($log | Where-Object { $_.Type -eq 'breakover' -and $_.At -eq '11:15' })
+Check 'no new session without a new trigger' ($null -eq $s.SessionStart)
+$s = New-State; $null = Start-Session $s $d.AddHours(10)
+$null = Sim $s $d.AddHours(10) $d.AddHours(11) $typeAll $sessAns
+Check 'trigger during rest is refused' ((Start-Session $s $d.AddHours(11).AddMinutes(5)) -eq $false)
+Check 'status while resting' ((Get-SessionStatus $s $d.AddHours(11).AddMinutes(5)) -eq 'Resting: 10 min left.')
+Check 'trigger after rest starts the next session' ((Start-Session $s $d.AddHours(11).AddMinutes(16)) -eq $true)
+
+Set-Config @{ water = @{ enabled = $false }; breaks = @{ enabled = $true; afterMinutes = 60 }; session = @{ enabled = $true; workMinutes = 90; restMinutes = 30; startOn = 'prompt' } }
+$s = New-State; $null = Start-Session $s $d.AddHours(10)
+$a = $null; $log = @(Sim $s $d.AddHours(10) $d.AddHours(12).AddMinutes(5) $typeAll { param($a, $t) $script:lastBtn = $a.Buttons[0]; 1 })
+$sess = @($log | Where-Object { $_.Type -eq 'session' })
+Check '90/30: session popup at 11:30, offers Resting 30' ($sess.Count -eq 1 -and $sess[0].At -eq '11:30' -and ($log | Where-Object { $_.Type -eq 'breakover' -and $_.At -eq '12:00' }))
+Check 'session timer replaces the plain break popup' (-not ($log | Where-Object { $_.Type -eq 'break' }))
+$s = New-State
+$log = @(Sim $s $d.AddHours(10) $d.AddHours(13) $typeAll $sessAns)
+Check 'prompt mode: no session until a trigger' ($log.Count -eq 0 -and (Get-SessionStatus $s $d.AddHours(13)) -eq 'No session running. The next AI prompt starts one.')
+
+Set-Config @{ water = @{ enabled = $false }; session = @{ enabled = $true; workMinutes = 45; restMinutes = 10; startOn = 'prompt' } }
+$s = New-State; $null = Start-Session $s $d.AddHours(10)
+$script:btnCounts = @()
+$log = @(Sim $s $d.AddHours(10) $d.AddHours(11).AddMinutes(20) $typeAll { param($a, $t) $script:btnCounts += $a.Buttons.Count; if ($a.Buttons.Count -ge 2) { 2 } else { 1 } })
+$sess = @($log | Where-Object { $_.Type -eq 'session' })
+Check 'custom 45/10: popup at 10:45, snooze repeats every 10 min' ($sess.Count -eq 4 -and $sess[0].At -eq '10:45' -and $sess[1].At -eq '10:55' -and $sess[3].At -eq '11:15')
+Check 'snooze button gone after 3 snoozes' (($btnCounts -join ',') -eq '2,2,2,1')
+$s = New-State; $null = Start-Session $s $d.AddHours(10)
+$log = @(Sim $s $d.AddHours(10) $d.AddHours(11) $typeAll { param($a, $t) 0 })
+Check 'ignored session popup asks again after 10 min' (@($log | Where-Object { $_.Type -eq 'session' }).Count -eq 2)
+
+Set-Config @{ water = @{ enabled = $false }; session = @{ enabled = $true; workMinutes = 60; restMinutes = 15; startOn = 'prompt' } }
+$s = New-State; $null = Start-Session $s $d.AddHours(10)
+$typeAway = { param($t) $t.Minute % 5 -eq 0 -and -not ($t -gt $d.AddHours(10).AddMinutes(20) -and $t -lt $d.AddHours(10).AddMinutes(40)) }
+$log = @(Sim $s $d.AddHours(10) $d.AddHours(11).AddMinutes(30) $typeAway $sessAns)
+Check 'stepping away as long as the rest ends the session quietly' ($log.Count -eq 0 -and $null -eq $s.SessionStart)
+$s = New-State; $null = Start-Session $s $d.AddHours(10)
+$log = @(Sim $s $d.AddHours(10) $d.AddHours(12) { param($t) $t -le $d.AddHours(10).AddMinutes(40) -and $t.Minute % 5 -eq 0 } $sessAns)
+Check 'no session popup while away' ($log.Count -eq 0)
+$s = New-State; $s.Remove('SessionStart'); $s.Remove('SessionNext'); $s.Remove('SessionSnoozes')
+$null = Start-Session $s $d.AddHours(10)
+$log = @(Sim $s $d.AddHours(10) $d.AddHours(11) $typeAll $sessAns)
+Check 'old state without session keys repaired' (@($log | Where-Object { $_.Type -eq 'session' }).Count -eq 1)
+Set-Config $null
+$s = New-State
+Check 'session off by default: trigger ignored' ((Start-Session $s $d.AddHours(10)) -eq $false -and (Get-SessionStatus $s $d.AddHours(10)) -eq 'Session timer is off.')
+$threw = $false; try { Set-Config @{ session = @{ enabled = $true; startOn = 'claude' } } } catch { $threw = $true }
+Check 'bad session.startOn rejected' $threw
+$threw = $false; try { Set-Config @{ session = @{ enabled = $true; workMinutes = 0 } } } catch { $threw = $true }
+Check 'zero-minute session rejected' $threw
+Set-Config $null
 
 if ($fail) { Write-Host "$fail FAILED"; exit 1 } else { Write-Host 'ALL PASS' }
